@@ -1,4 +1,5 @@
 # Walksnail VRX Hardware Control Node (Wemos D1 Mini)
+# stm32 key pad (https://github.com/Mark4Titan/key_pad)
 
 Цей репозиторій містить прошивку для модуля **Wemos D1 Mini (ESP8266)**, який виступає в ролі інтелектуального залізничного вузла керування для цифрового FPV-відеоприймача **Walksnail Avatar VRX**. 
 
