@@ -4,42 +4,50 @@
 #include <DNSServer.h>
 #include <EEPROM.h>
 #include <SoftwareSerial.h>
+#include <Servo.h> 
 
-// Піни X9C103S
-#define PIN_CS   14  // GPIO14 (D5) 
+// Оновлені піни
+#define PIN_CS   13  // GPIO13 (D7) 
 #define PIN_INC  12  // GPIO12 (D6)
-#define PIN_UD   13  // GPIO13 (D7)
-
-// Оновлені піни за вашим завданням
+#define PIN_UD   14  // GPIO14 (D5) 
+#define PIN_FUNC_RELAY  5  // GPIO5 (D1) -> Вихід на PWM Реле (RC Switch)
 #define PIN_BIND_BUTTON 4  // GPIO4 (D2) -> Оптопара бінду 
 #define PIN_TRIGER     16  // GPIO16 (D0) -> "Рубильник" PC817 (ON/OFF) на VL
 
-SoftwareSerial remoteSerial(D3, D4); // RX=D3, TX=D4
+SoftwareSerial remoteSerial(D3, D4); 
 
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
 ESP8266WebServer server(80);
+Servo funcRelay; 
 
 const char *ssid = "Walksnail_Remote";
 const char *password = "12345678";
 
 bool wifiActive = false; 
 unsigned long lastUartPacketTime = 0;
-const unsigned long WIFI_TIMEOUT_MS = 10000; 
+const unsigned long WIFI_TIMEOUT_MS = 10000; // 10 сек таймаут для Wi-Fi AP
+const unsigned long UART_OFFLINE_MS = 2000;  // 2 сек таймаут для індикації втрати зв'язку
 
-String lastReceivedHex = "00 00 00 (No data yet)";
+// Змінні затримки 15 секунд при старті
+unsigned long bootTime = 0;
+unsigned long lastRelayRefresh = 0;
+const unsigned long RELAY_REFRESH_INTERVAL_MS = 4000; 
+bool initialRelayApplied = false;
+
+String lastReceivedHex = "NO SIGNAL (Disconnected)";
 
 const char* keyNames[9] = {"UP", "DOWN", "LEFT", "RIGHT", "ENTER", "BACK", "REC", "BIND", "FUNC"};
 
 struct ButtonItem {
-  int step; // Значення опору для X9C103S (0-99)
+  int step; 
   uint8_t b1, b2, b3;
 };
 
-// Спрощена структура таймінгів під нову логіку
 struct MainConfig {
   uint16_t magic;
-  uint16_t t1, t2, t3; // t1: пауза перед кліком, t2: тривалість кліку, t3: пауза після
+  uint16_t t2; 
+  bool funcRelayState; 
   ButtonItem keys[9]; 
 } cfg;
 
@@ -52,25 +60,40 @@ void saveConfig() {
 }
 
 void loadDefaults() {
-  cfg.magic = 0xAA57; // Оновлений magic для скидання EEPROM під нові таймінги
-  
-  // Дефолтні таймінги для PC817
-  cfg.t1 = 2;  // ms: Час на стабілізацію опору X9C103S після зміни
-  cfg.t2 = 50; // ms: Тривалість "натискання" (замикання PC817)
-  cfg.t3 = 5;  // ms: Пауза після "відпускання"
+  cfg.magic = 0xAA60; 
+  cfg.t2 = 50;        
+  cfg.funcRelayState = false; 
 
-  // Дефолтні кроки (0-99).
+  // Ваші точні робочі кроки
   cfg.keys[0].step = 9;   cfg.keys[0].b1 = 0x46; cfg.keys[0].b2 = 0xFF; cfg.keys[0].b3 = 0x29; // UP
-  cfg.keys[1].step = 3;  cfg.keys[1].b1 = 0xC6; cfg.keys[1].b2 = 0xFB; cfg.keys[1].b3 = 0x27; // DOWN
-  cfg.keys[2].step = 6;  cfg.keys[2].b1 = 0x46; cfg.keys[2].b2 = 0xFB; cfg.keys[2].b3 = 0x25; // LEFT
-  cfg.keys[3].step = 5;  cfg.keys[3].b1 = 0xB7; cfg.keys[3].b2 = 0x23; cfg.keys[3].b3 = 0x23; // RIGHT
-  cfg.keys[4].step = 4;  cfg.keys[4].b1 = 0x0C; cfg.keys[4].b2 = 0xFF; cfg.keys[4].b3 = 0x2B; // ENTER
-  cfg.keys[5].step = 2;  cfg.keys[5].b1 = 0xC6; cfg.keys[5].b2 = 0xDD; cfg.keys[5].b3 = 0x3F; // BACK
+  cfg.keys[1].step = 3;   cfg.keys[1].b1 = 0xC6; cfg.keys[1].b2 = 0xFB; cfg.keys[1].b3 = 0x27; // DOWN
+  cfg.keys[2].step = 6;   cfg.keys[2].b1 = 0x46; cfg.keys[2].b2 = 0xFB; cfg.keys[2].b3 = 0x25; // LEFT
+  cfg.keys[3].step = 5;   cfg.keys[3].b1 = 0xB7; cfg.keys[3].b2 = 0x23; cfg.keys[3].b3 = 0x23; // RIGHT
+  cfg.keys[4].step = 4;   cfg.keys[4].b1 = 0x0C; cfg.keys[4].b2 = 0xFF; cfg.keys[4].b3 = 0x2B; // ENTER
+  cfg.keys[5].step = 2;   cfg.keys[5].b1 = 0xC6; cfg.keys[5].b2 = 0xDD; cfg.keys[5].b3 = 0x3F; // BACK
   cfg.keys[6].step = 24;  cfg.keys[6].b1 = 0x46; cfg.keys[6].b2 = 0xDD; cfg.keys[6].b3 = 0x3D; // REC 
   
   cfg.keys[7].step = 0;   cfg.keys[7].b1 = 0xAC; cfg.keys[7].b2 = 0xFF; cfg.keys[7].b3 = 0x53; // BIND
   cfg.keys[8].step = 0;   cfg.keys[8].b1 = 0x4C; cfg.keys[8].b2 = 0xFF; cfg.keys[8].b3 = 0x3B; // FUNC 
   saveConfig();
+}
+
+void refreshRelayFromEEPROM() {
+  MainConfig tempCfg;
+  EEPROM.get(0, tempCfg);
+  
+  if (tempCfg.magic == cfg.magic) {
+    cfg.funcRelayState = tempCfg.funcRelayState;
+  }
+
+  if (cfg.funcRelayState) {
+  
+    funcRelay.writeMicroseconds(2100);
+  } else {
+    funcRelay.writeMicroseconds(900);
+  }
+
+  lastRelayRefresh = millis();
 }
 
 void initPot() {
@@ -82,52 +105,56 @@ void initPot() {
   digitalWrite(PIN_INC, HIGH);
   digitalWrite(PIN_UD, HIGH);
   
-  // Паркуємо потенціометр в 0
   digitalWrite(PIN_UD, LOW); 
   digitalWrite(PIN_CS, LOW); 
+  delayMicroseconds(10);
+  
   for(int i = 0; i < 100; i++) {
     digitalWrite(PIN_INC, LOW);
     delayMicroseconds(50);
+    if (i == 99) {
+      digitalWrite(PIN_CS, HIGH); 
+      delayMicroseconds(10);
+    }
     digitalWrite(PIN_INC, HIGH);
     delayMicroseconds(50);
   }
-  digitalWrite(PIN_CS, HIGH); 
   currentPotStep = 0;
 }
 
 void setPot(int target) {
   if (target < 0) target = 0;
   if (target > 99) target = 99;
-  if (currentPotStep == target) return; // Вже на потрібній позиції
+  if (currentPotStep == target) return; 
   
   digitalWrite(PIN_UD, (target > currentPotStep) ? HIGH : LOW);
   digitalWrite(PIN_CS, LOW);
+  delayMicroseconds(10);
   
   int stepsToMove = abs(target - currentPotStep);
   for(int i = 0; i < stepsToMove; i++) {
     digitalWrite(PIN_INC, LOW);
     delayMicroseconds(50);
+    if (i == stepsToMove - 1) {
+      digitalWrite(PIN_CS, HIGH); 
+      delayMicroseconds(10);
+    }
     digitalWrite(PIN_INC, HIGH);
     delayMicroseconds(50);
   }
   
-  digitalWrite(PIN_CS, HIGH);
   currentPotStep = target;
 }
 
-// Нова проста та надійна логіка кліку
 void executePulse(int targetStep) {
-  // 1. Виставляємо резистор (ланцюг розірвано, VRX нічого не відчуває)
   setPot(targetStep);  
-  delay(cfg.t1); // Пауза на стабілізацію X9C103S
+  delay(1); 
   
-  // 2. Робимо імпульс на PC817 (замикаємо ланцюг)
   digitalWrite(PIN_TRIGER, HIGH); 
-  delay(cfg.t2); // Тримаємо "кнопку" натиснутою
+  delay(cfg.t2); 
   
-  // 3. Вимикаємо оптопару (розриваємо ланцюг)
   digitalWrite(PIN_TRIGER, LOW);  
-  delay(cfg.t3); // Пауза після кліку (anti-bounce)
+  delay(1); 
 }
 
 void executeAction(int id) {
@@ -135,15 +162,13 @@ void executeAction(int id) {
     digitalWrite(PIN_BIND_BUTTON, HIGH);
     delay(500); 
     digitalWrite(PIN_BIND_BUTTON, LOW);
-    Serial.println("[ACTION] Hardware BIND executed (500ms).");
-  } 
-  else if (id == 8) {
-    Serial.println("[ACTION] Custom FUNC button executed!");
-  } 
-  else {
-    // Виконуємо чистий клік через PC817
+  } else if (id == 8) {
+    cfg.funcRelayState = !cfg.funcRelayState; 
+    saveConfig(); 
+    refreshRelayFromEEPROM(); 
+    initialRelayApplied = true;
+  } else {
     executePulse(cfg.keys[id].step);
-    Serial.printf("[ACTION] Button %s executed (Step: %d).\n", keyNames[id], cfg.keys[id].step);
   }
 }
 
@@ -155,14 +180,14 @@ void startWiFiAP() {
   dnsServer.start(DNS_PORT, "*", IPAddress(192, 168, 4, 1));
   server.begin();
   wifiActive = true;
-  Serial.println("[SYSTEM] Wi-Fi AP Activated!");
+  Serial.println("[SYSTEM] Wi-Fi AP Enabled");
 }
 
 void stopWiFiAP() {
   if (!wifiActive) return;
   WiFi.mode(WIFI_OFF);
   wifiActive = false;
-  Serial.println("[SYSTEM] Wi-Fi AP Disabled.");
+  Serial.println("[SYSTEM] Wi-Fi AP Disabled");
 }
 
 void handleRoot() {
@@ -175,7 +200,7 @@ void handleRoot() {
   html += ".btn-action{width:70px;height:70px;border-radius:15px;margin:5px;font-size:20px;box-shadow: 0 4px #222831;} .btn-action:active{transform: translateY(2px);box-shadow:0 2px #222831;}";
   html += ".monitor-box { background:#393e46; border:2px solid #ff9f43; border-radius:10px; padding:10px; margin: 15px auto; width:90%; max-width:320px; }";
   html += ".monitor-box h4 { margin: 0 0 5px 0; color:#ff9f43; font-size:14px; text-transform: uppercase; }";
-  html += ".monitor-data { font-family: 'Courier New', monospace; font-size:18px; font-weight:bold; color:#fff; }";
+  html += ".monitor-data { font-family: 'Courier New', monospace; font-size:16px; font-weight:bold; color:#fff; }";
   html += ".timing-box { background:#222831; padding:10px; border-radius:10px; margin: 15px auto; width:90%; max-width:320px; text-align:left; font-size:14px; }";
   html += "</style></head><body><h2>Walksnail VRX Control</h2>";
   
@@ -190,16 +215,17 @@ void handleRoot() {
   html += "  <button class='btn btn-action' onclick=\"fetch('/click?id=3')\">&rarr;</button><br>";
   html += "  <button class='btn btn-action' onclick=\"fetch('/click?id=1')\">&darr;</button><br><br>";
   
-  html += "  <button class='btn' style='border-color:#ff2e63;color:#ff2e63;width:110px;height:45px;font-size:14px;margin-right:10px;' onclick=\"if(confirm('Start BIND process?')){fetch('/click?id=7');}\">BIND</button>";
-  html += "  <button class='btn' style='border-color:#ff9f43;color:#ff9f43;width:110px;height:45px;font-size:14px;' onclick=\"fetch('/click?id=8')\">FUNC</button>"; 
+  html += "  <button class='btn' style='border-color:#ff2e63;color:#ff2e63;width:110px;height:45px;font-size:14px;margin-right:10px;' onclick=\"if(confirm('Start BIND process?')){window.location.href='/click?id=7';}\">BIND</button>";
+  
+  String relayColor = cfg.funcRelayState ? "#00FF00" : "#ff9f43";
+  String relayText = cfg.funcRelayState ? "1.3G: ON" : "1.3G: OFF";
+  html += "  <button class='btn' style='border-color:" + relayColor + ";color:" + relayColor + ";width:110px;height:45px;font-size:14px;' onclick=\"window.location.href='/click?id=8'\">" + relayText + "</button>"; 
   html += "</div><br>";
 
-  // Спрощена форма з таймінгами
   html += "<form action='/save' method='POST'>";
-  html += "<div class='timing-box'><h4 style='color:#00adb5;margin-top:0;text-align:center;'>PC817 Click Timings (ms)</h4>";
-  html += "Pre-Delay (T1): <input type='number' name='t1' value='" + String(cfg.t1) + "' style='width:60px;float:right;'><br><br>";
-  html += "Hold Time (T2): <input type='number' name='t2' value='" + String(cfg.t2) + "' style='width:60px;float:right;'><br><br>";
-  html += "Post-Delay (T3): <input type='number' name='t3' value='" + String(cfg.t3) + "' style='width:60px;float:right;'></div>";
+  html += "<div class='timing-box'><h4 style='color:#00adb5;margin-top:0;text-align:center;'>PC817 Click Timing</h4>";
+  html += "Hold Time (T2 ms): <input type='number' name='t2' value='" + String(cfg.t2) + "' style='width:70px;float:right;'><br><br>";
+  html += "<small style='color:#aaa;'>*T1 (Pre-Delay) & T3 (Post-Delay) are fixed at 1ms.</small></div>";
 
   html += "<table><tr><th>Key</th><th>STEP<br>(0-99)</th><th>HEX1</th><th>HEX2</th><th>HEX3</th></tr>";
   for (int i = 0; i < 9; i++) {
@@ -224,18 +250,25 @@ void setup() {
   
   EEPROM.begin(sizeof(MainConfig));
   EEPROM.get(0, cfg);
-  if (cfg.magic != 0xAA57) loadDefaults(); 
+  if (cfg.magic != 0xAA60) loadDefaults(); 
 
   initPot(); 
 
   pinMode(PIN_BIND_BUTTON, OUTPUT); digitalWrite(PIN_BIND_BUTTON, LOW);
-  pinMode(PIN_TRIGER, OUTPUT);      digitalWrite(PIN_TRIGER, LOW); // За замовчуванням PC817 розімкнута
+  pinMode(PIN_TRIGER, OUTPUT);      digitalWrite(PIN_TRIGER, LOW); 
+
+  funcRelay.attach(PIN_FUNC_RELAY);
+  funcRelay.writeMicroseconds(900); // Стартуємо з OFF
+  
+  bootTime = millis();
+  lastRelayRefresh = millis();
+  initialRelayApplied = false;
+
+  startWiFiAP(); // Завжди вмикаємо Wi-Fi при старті
 
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, [](){
-    if(server.hasArg("t1")) cfg.t1 = server.arg("t1").toInt();
     if(server.hasArg("t2")) cfg.t2 = server.arg("t2").toInt();
-    if(server.hasArg("t3")) cfg.t3 = server.arg("t3").toInt();
 
     for(int i=0; i<9; i++){
       if(i < 7 && server.hasArg("p"+String(i))) cfg.keys[i].step = server.arg("p"+String(i)).toInt();
@@ -260,21 +293,43 @@ void setup() {
 }
 
 void loop() {
+  unsigned long currentMillis = millis();
+
+  // --- 1. АВТОМАТИЧНИЙ ДЕТЕКТ ВТРАТИ СИГНАЛУ UART ---
+  if (currentMillis - lastUartPacketTime > UART_OFFLINE_MS) {
+    lastReceivedHex = "<span style='color:#ff2e63;'>NO SIGNAL (Disconnected)</span>";
+  }
+
+  // --- 2. ГНУЧКЕ КЕРУВАННЯ WI-FI AP ---
   int wifiClients = WiFi.softAPgetStationNum();
+  bool uartAlive = (currentMillis - lastUartPacketTime < WIFI_TIMEOUT_MS);
+
+  if (uartAlive && wifiClients == 0) {
+    // Сигнал від пульта є і ніхто не підключений по Wi-Fi -> вимикаємо AP для захисту від завад
+    if (wifiActive) stopWiFiAP();
+  } else {
+    // Пульт відключений АБО до Wi-Fi підключився смартфон -> тримаємо AP увімкненою
+    if (!wifiActive) startWiFiAP();
+  }
 
   if (wifiActive) {
     dnsServer.processNextRequest();
     server.handleClient();
-    
-    if (wifiClients == 0 && (millis() - lastUartPacketTime < WIFI_TIMEOUT_MS)) {
-      stopWiFiAP();
+  }
+
+  // --- 3. ЛОГІКА ЗАПОБІГАННЯ ХОЛОДНОГО СТАРТУ РЕЛЕ (15 СЕКУНД) ---
+  if (!initialRelayApplied) {
+    if (currentMillis - bootTime >= RELAY_REFRESH_INTERVAL_MS) {
+      initialRelayApplied = true;
+      refreshRelayFromEEPROM(); 
     }
   } else {
-    if (millis() - lastUartPacketTime > WIFI_TIMEOUT_MS) {
-      startWiFiAP();
+    if (currentMillis - lastRelayRefresh >= RELAY_REFRESH_INTERVAL_MS) {
+      refreshRelayFromEEPROM();
     }
   }
 
+  // --- 4. ОБРОБНИК ВХІДНИХ ПАКЕТІВ UART ---
   if (remoteSerial.available() >= 3) {
     uartBuffer[0] = remoteSerial.read();
     if (uartBuffer[0] != 0xC6 && uartBuffer[0] != 0x46 && uartBuffer[0] != 0xAC && uartBuffer[0] != 0x0C && uartBuffer[0] != 0x4C && uartBuffer[0] != 0xB7) {
@@ -294,8 +349,7 @@ void loop() {
     }
 
     lastReceivedHex = String(hexStr) + " (OK)";
-    Serial.printf("[UART] Captured: %02X %02X %02X\n", uartBuffer[0], uartBuffer[1], uartBuffer[2]);
-
+    
     for (int i = 0; i < 9; i++) {
       if (uartBuffer[0] == cfg.keys[i].b1 && uartBuffer[1] == cfg.keys[i].b2 && uartBuffer[2] == cfg.keys[i].b3) {
         executeAction(i); 
