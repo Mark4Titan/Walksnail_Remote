@@ -7,9 +7,9 @@
 #include <Servo.h> 
 
 // Оновлені піни
-#define PIN_CS   13  // GPIO13 (D7) 
+#define PIN_CS   14  // GPIO14 (D5) 
 #define PIN_INC  12  // GPIO12 (D6)
-#define PIN_UD   14  // GPIO14 (D5) 
+#define PIN_UD   13  // GPIO13 (D7) 
 #define PIN_FUNC_RELAY  5  // GPIO5 (D1) -> Вихід на PWM Реле (RC Switch)
 #define PIN_BIND_BUTTON 4  // GPIO4 (D2) -> Оптопара бінду 
 #define PIN_TRIGER     16  // GPIO16 (D0) -> "Рубильник" PC817 (ON/OFF) на VL
